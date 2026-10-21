@@ -5,6 +5,7 @@ import time
 import random
 from copy import deepcopy
 
+import utils.xla_compat  # noqa: F401  (patches torch_xla for transformers 4.17)
 import datasets
 import numpy as np
 import torch
