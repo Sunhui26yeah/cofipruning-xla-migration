@@ -3,6 +3,7 @@ import torch
 
 try:
     import torch_xla
+    import torch_xla.backends
     import torch_xla.core.xla_model as xm
     import torch_xla.runtime as xr
     IS_XLA = True
