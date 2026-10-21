@@ -91,6 +91,16 @@ class L0Module(Module):
             logger.info(f"size", self.sizes[type])
         logger.info(f"prunable model size: {self.prunable_model_size}")
 
+    def _apply(self, fn, *args, **kwargs):
+        # Module.to(xla) replaces CPU parameters with new Parameter objects; re-point the z_logas dict to them,
+        # otherwise sampling, clamping and the task gradient keep using the stale CPU tensors
+        super()._apply(fn, *args, **kwargs)
+        attr = {"hidden": "hidden_loga", "head": "head_loga", "head_layer": "headlayer_loga",
+                "intermediate": "int_loga", "mlp": "intlayer_loga"}
+        for type in self.types:
+            self.z_logas[type] = getattr(self, attr[type])
+        return self
+
     def set_lagrangian_warmup_steps(self, lagrangian_warmup):
         self.lagrangian_warmup = lagrangian_warmup
 
