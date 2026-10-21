@@ -29,6 +29,7 @@ from transformers.training_args import TrainingArguments
 from args import AdditionalArguments
 from utils.cofi_utils import *
 from utils.utils import *
+from utils.xla_compat import mark_step
 
 import wandb
 
@@ -323,6 +324,9 @@ class CoFiTrainer(Trainer):
                     if self.lagrangian_optimizer is not None:
                         self.lagrangian_optimizer.zero_grad()
 
+                    # cut the lazy XLA graph once per optimizer step
+                    mark_step()
+
                     self.global_step += 1
                     self.epoch = epoch + (step + 1) / len(epoch_iterator)
 
@@ -433,6 +437,7 @@ class CoFiTrainer(Trainer):
                 self.fill_inputs_with_zs(zs, inputs) #! use the zs
             loss, logits, labels = self.prediction_step(
                 model, inputs, prediction_loss_only)
+            mark_step()
 
             batch_size = inputs[list(inputs.keys())[0]].shape[0]
 
