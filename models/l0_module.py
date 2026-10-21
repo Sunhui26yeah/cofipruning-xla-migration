@@ -12,6 +12,14 @@ from torch.autograd import Variable
 from transformers.utils import logging
 
 limit_a, limit_b, epsilon = -.1, 1.1, 1e-6
+
+
+def exact_sigmoid(x):
+    """sigmoid(x) without the tail error of torch.sigmoid on XLA/TPU (-66% value and gradient at |x| ~ 11).
+    exp(-|x|) never overflows, so both branches stay finite."""
+    e = torch.exp(-torch.abs(x))
+    return torch.where(x >= 0, 1 / (1 + e), e / (1 + e))
+
 logger = logging.get_logger(__name__)
 
 class L0Module(Module):
@@ -82,6 +90,16 @@ class L0Module(Module):
             logger.info(f"z.shape", self.z_logas[type].shape)
             logger.info(f"size", self.sizes[type])
         logger.info(f"prunable model size: {self.prunable_model_size}")
+
+    def _apply(self, fn, *args, **kwargs):
+        # Module.to(xla) replaces CPU parameters with new Parameter objects; re-point the z_logas dict to them,
+        # otherwise sampling, clamping and the task gradient keep using the stale CPU tensors
+        super()._apply(fn, *args, **kwargs)
+        attr = {"hidden": "hidden_loga", "head": "head_loga", "head_layer": "headlayer_loga",
+                "intermediate": "int_loga", "mlp": "intlayer_loga"}
+        for type in self.types:
+            self.z_logas[type] = getattr(self, attr[type])
+        return self
 
     def set_lagrangian_warmup_steps(self, lagrangian_warmup):
         self.lagrangian_warmup = lagrangian_warmup
@@ -180,10 +198,10 @@ class L0Module(Module):
         """Implements the CDF of the 'stretched' concrete distribution"""
         xn = (x - limit_a) / (limit_b - limit_a)
         logits = math.log(xn) - math.log(1 - xn)
-        return torch.sigmoid(logits * self.temperature - loga).clamp(min=epsilon, max=1 - epsilon)
+        return exact_sigmoid(logits * self.temperature - loga).clamp(min=epsilon, max=1 - epsilon)
 
     def quantile_concrete(self, x, loga):
-        y = torch.sigmoid((torch.log(x) - torch.log(1 - x) + loga) / self.temperature)
+        y = exact_sigmoid((torch.log(x) - torch.log(1 - x) + loga) / self.temperature)
         return y * (limit_b - limit_a) + limit_a
 
     def get_num_parameters_for_one(self, loga, parameter_size):
@@ -295,7 +313,7 @@ class L0Module(Module):
             num_zeros = round(expected_num_zeros)
         except:
             pdb.set_trace()
-        soft_mask = torch.sigmoid(loga / self.temperature * self.magical_number)
+        soft_mask = exact_sigmoid(loga / self.temperature * self.magical_number)
         if num_zeros > 0:
             if soft_mask.ndim == 0:
                 soft_mask = torch.tensor(0).to(loga.device)
