@@ -535,16 +535,18 @@ class CoFiBertSelfOutput(BertSelfOutput):
         hidden_states = self.dense(hidden_states)
         if head_layer_z is not None:
             hidden_states = hidden_states.mul(head_layer_z)
-        if not inference and hidden_states.sum().eq(0).item():
-            hidden_states = hidden_states + input_tensor
-        else:
-            if hidden_z is not None:
-                hidden_states = hidden_states.mul(hidden_z)
-            hidden_states = self.dropout(hidden_states)
-            hidden_states = self.LayerNorm(
-                hidden_states + input_tensor, hidden_z)
-            if hidden_z is not None:
-                hidden_states = hidden_states.mul(hidden_z)
+        is_zero = hidden_states.sum().eq(0)
+        skipped = hidden_states + input_tensor
+        if hidden_z is not None:
+            hidden_states = hidden_states.mul(hidden_z)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(
+            hidden_states + input_tensor, hidden_z)
+        if hidden_z is not None:
+            hidden_states = hidden_states.mul(hidden_z)
+        if not inference:
+            # a fully masked layer is skipped; select on device instead of a host sync (.item())
+            hidden_states = torch.where(is_zero, skipped, hidden_states)
         return hidden_states
 
 
@@ -561,16 +563,18 @@ class CoFiBertOutput(BertOutput):
         hidden_states = self.dense(hidden_states)
         if mlp_z is not None:
             hidden_states *= mlp_z
-        if not inference and hidden_states.sum().eq(0).item():
-            return hidden_states + input_tensor
-        else:
-            if hidden_z is not None:
-                hidden_states = hidden_states.mul(hidden_z)
-            hidden_states = self.dropout(hidden_states)
-            hidden_states = self.LayerNorm(
-                hidden_states + input_tensor, hidden_z)
-            if hidden_z is not None:
-                hidden_states = hidden_states.mul(hidden_z)
+        is_zero = hidden_states.sum().eq(0)
+        skipped = hidden_states + input_tensor
+        if hidden_z is not None:
+            hidden_states = hidden_states.mul(hidden_z)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(
+            hidden_states + input_tensor, hidden_z)
+        if hidden_z is not None:
+            hidden_states = hidden_states.mul(hidden_z)
+        if not inference:
+            # a fully masked layer is skipped; select on device instead of a host sync (.item())
+            hidden_states = torch.where(is_zero, skipped, hidden_states)
         return hidden_states
 
 
