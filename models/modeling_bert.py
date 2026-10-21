@@ -26,16 +26,15 @@ class CoFiLayerNorm(torch.nn.LayerNorm):
 
     def forward(self, input, hidden_z=None):
         if hidden_z is not None:
-            remaining_index = torch.where(~hidden_z.eq(0))[0]
-            compressed_input = torch.index_select(
-                input, dim=-1, index=remaining_index)
-            compressed_weight = self.weight[remaining_index]
-            compressed_bias = self.bias[remaining_index]
-            normalized_shape = len(remaining_index)
-            normed_input = F.layer_norm(
-                compressed_input, [normalized_shape], compressed_weight, compressed_bias, self.eps)
-            output = input.clone()
-            output[:, :, remaining_index] = normed_input
+            # layer norm over the dims with hidden_z != 0 only, other dims pass through unchanged;
+            # masked statistics instead of index_select keep the shapes static under XLA
+            keep = ~hidden_z.eq(0)
+            keep_f = keep.to(input.dtype)
+            n = keep_f.sum()
+            mean = (input * keep_f).sum(-1, keepdim=True) / n
+            var = (((input - mean) * keep_f) ** 2).sum(-1, keepdim=True) / n
+            normed_input = (input - mean) / torch.sqrt(var + self.eps) * self.weight + self.bias
+            output = torch.where(keep, normed_input, input)
         else:
             output = F.layer_norm(
                 input, self.normalized_shape, self.weight, self.bias, self.eps)
