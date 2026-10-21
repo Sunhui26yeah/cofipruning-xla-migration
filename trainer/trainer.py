@@ -565,9 +565,9 @@ class CoFiTrainer(Trainer):
             head_layer_z = None
             # logger.info(f"zs={zs}")
             if "mlp_z" in zs:
-                mlp_z = zs["mlp_z"].detach().cpu()
+                mlp_z = zs["mlp_z"].detach()
             if "head_layer_z" in zs:
-                head_layer_z = zs["head_layer_z"].detach().cpu()
+                head_layer_z = zs["head_layer_z"].detach()
 
             teacher_layer_output = teacher_outputs[2][1:] #! hidden states, with a length of 12. Every has a shape of [32, 65, 768]
             student_layer_output = student_outputs[2][1:] 
@@ -620,23 +620,22 @@ class CoFiTrainer(Trainer):
                     alignment = torch.argmin(layerwiseloss, dim=1)
                 #! added the ordering restriction -> to choose the min loss in 4 student layers
                 elif self.additional_args.layer_distill_version in (3, 4, 5, 6):
-                    last_aligned_layer = 12
+                    # same search as the sort/filter loop, on device: walk the student layers in order of increasing
+                    # loss and take the first one passing the filter. As in the original, existing_layers is applied
+                    # by position in the sorted order (indexes[(indexes < last) & existing_layers]).
+                    last_aligned_layer = torch.tensor(12, device=device)
                     alignment = []
                     for search_index in range(len(specified_teacher_layers)-1, -1, -1):
-                        indexes = layerwiseloss[search_index].sort()[1]
+                        indexes = layerwiseloss[search_index].detach().sort()[1]
+                        allowed = indexes < last_aligned_layer
                         if existing_layers is not None:
-                            align = indexes[(
-                                indexes < last_aligned_layer) & existing_layers]
-                        else:
-                            align = indexes[indexes < last_aligned_layer]
-                        if len(align) > 0:
-                            align = align[0]
-                        else:
-                            align = last_aligned_layer
+                            allowed = allowed & existing_layers
+                        first = torch.argmax(allowed.to(torch.int32))
+                        align = torch.where(allowed.any(), indexes[first], last_aligned_layer)
                         alignment.append(align)
                         last_aligned_layer = align
                     alignment.reverse()
-                    alignment = torch.tensor(alignment).to(device)
+                    alignment = torch.stack(alignment)
                 else:
                     logger.info(
                         f"{self.additional_args.layer_distill_version} version is not specified.")
