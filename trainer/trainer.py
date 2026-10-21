@@ -662,12 +662,14 @@ class CoFiTrainer(Trainer):
         layer_loss = self.calculate_layer_distillation_loss(teacher_outputs, student_outputs, zs)
         distill_loss = layer_loss
 
-        ce_distill_loss = F.kl_div(
-            input=F.log_softmax(
-                student_outputs[1] / self.additional_args.distill_temp, dim=-1), #! logits: [32,3]
-            target=F.softmax(
-                teacher_outputs[1] / self.additional_args.distill_temp, dim=-1), #! distill_temp: 2.0
-            reduction="batchmean") * (self.additional_args.distill_temp ** 2)
+        # F.kl_div(log_p_s, p_t, reduction="batchmean") written out: torch_xla 2.9 has no autograd kernel for
+        # aten::kl_div ("may lead to silently incorrect behavior")
+        log_p_s = F.log_softmax(
+            student_outputs[1] / self.additional_args.distill_temp, dim=-1) #! logits: [32,3]
+        p_t = F.softmax(
+            teacher_outputs[1] / self.additional_args.distill_temp, dim=-1) #! distill_temp: 2.0
+        ce_distill_loss = torch.sum(torch.xlogy(p_t, p_t) - p_t * log_p_s) / log_p_s.shape[0] \
+            * (self.additional_args.distill_temp ** 2)
 
         loss = self.additional_args.distill_ce_loss_alpha * ce_distill_loss
         if distill_loss is not None:
