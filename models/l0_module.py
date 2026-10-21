@@ -382,16 +382,18 @@ class L0Module(Module):
                 z = self._sample_z(loga)
                 zs[f"{type}_z"] = z.reshape(self.shapes[type])
         else:
+            # deterministic masks on CPU copies (as in the original, where the module stays on CPU): on XLA the
+            # data-dependent topk(k=num_zeros) compiles new graphs at almost every eval and host memory grows
             for i, type in enumerate(self.types):
                 if type != "hidden": # hidden is not a per layer sample
-                    loga_all_layers = self.z_logas[type]
+                    loga_all_layers = self.z_logas[type].detach().cpu()
                     for layer in range(len(loga_all_layers)):
                         loga = loga_all_layers[layer]
                         size = self.sizes[type]
                         z = self._deterministic_z(size, loga)
                         zs[f"{type}_z"].append(z.reshape(self.shapes[type][1:]))
                 else:
-                    z = self._deterministic_z(self.sizes[type], self.hidden_loga)
+                    z = self._deterministic_z(self.sizes[type], self.hidden_loga.detach().cpu())
                     zs[f"{type}_z"] = z
             for type in zs:
                 if type != "hidden_z":
