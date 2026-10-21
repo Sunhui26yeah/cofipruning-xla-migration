@@ -29,7 +29,7 @@ from transformers.training_args import TrainingArguments
 from args import AdditionalArguments
 from utils.cofi_utils import *
 from utils.utils import *
-from utils.xla_compat import mark_step, xla_log_fields, dump_xla_metrics
+from utils.xla_compat import mark_step, xla_log_fields, dump_xla_metrics, to_host
 
 import wandb
 
@@ -445,6 +445,8 @@ class CoFiTrainer(Trainer):
             loss, logits, labels = self.prediction_step(
                 model, inputs, prediction_loss_only)
             mark_step()
+            # accumulate on the host: concatenating on device gives every eval batch a new graph shape
+            loss, logits, labels = to_host(loss), to_host(logits), to_host(labels)
 
             batch_size = inputs[list(inputs.keys())[0]].shape[0]
 
