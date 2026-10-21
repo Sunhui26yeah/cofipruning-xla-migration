@@ -29,7 +29,7 @@ from transformers.training_args import TrainingArguments
 from args import AdditionalArguments
 from utils.cofi_utils import *
 from utils.utils import *
-from utils.xla_compat import mark_step, xla_log_fields, dump_xla_metrics
+from utils.xla_compat import mark_step, xla_log_fields, dump_xla_metrics, to_host
 
 import wandb
 
@@ -445,6 +445,8 @@ class CoFiTrainer(Trainer):
             loss, logits, labels = self.prediction_step(
                 model, inputs, prediction_loss_only)
             mark_step()
+            # accumulate on the host: concatenating on device gives every eval batch a new graph shape
+            loss, logits, labels = to_host(loss), to_host(logits), to_host(labels)
 
             batch_size = inputs[list(inputs.keys())[0]].shape[0]
 
@@ -638,7 +640,7 @@ class CoFiTrainer(Trainer):
                         if existing_layers is not None:
                             allowed = allowed & existing_layers
                         first = torch.argmax(allowed.to(torch.int32))
-                        align = torch.where(allowed.any(), indexes[first], last_aligned_layer)
+                        align = torch.where(allowed.any(), indexes.gather(0, first.view(1)).squeeze(0), last_aligned_layer)  # gather: a 0-dim index would call .item()
                         alignment.append(align)
                         last_aligned_layer = align
                     alignment.reverse()
@@ -660,12 +662,14 @@ class CoFiTrainer(Trainer):
         layer_loss = self.calculate_layer_distillation_loss(teacher_outputs, student_outputs, zs)
         distill_loss = layer_loss
 
-        ce_distill_loss = F.kl_div(
-            input=F.log_softmax(
-                student_outputs[1] / self.additional_args.distill_temp, dim=-1), #! logits: [32,3]
-            target=F.softmax(
-                teacher_outputs[1] / self.additional_args.distill_temp, dim=-1), #! distill_temp: 2.0
-            reduction="batchmean") * (self.additional_args.distill_temp ** 2)
+        # F.kl_div(log_p_s, p_t, reduction="batchmean") written out: torch_xla 2.9 has no autograd kernel for
+        # aten::kl_div ("may lead to silently incorrect behavior")
+        log_p_s = F.log_softmax(
+            student_outputs[1] / self.additional_args.distill_temp, dim=-1) #! logits: [32,3]
+        p_t = F.softmax(
+            teacher_outputs[1] / self.additional_args.distill_temp, dim=-1) #! distill_temp: 2.0
+        ce_distill_loss = torch.sum(torch.xlogy(p_t, p_t) - p_t * log_p_s) / log_p_s.shape[0] \
+            * (self.additional_args.distill_temp ** 2)
 
         loss = self.additional_args.distill_ce_loss_alpha * ce_distill_loss
         if distill_loss is not None:

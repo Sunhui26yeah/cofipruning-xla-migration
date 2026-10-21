@@ -47,3 +47,12 @@ def dump_xla_metrics(path):
         import torch_xla.debug.metrics as met
         with open(path, "w") as f:
             f.write(met.metrics_report())
+
+
+def to_host(x):
+    """Copy (nested tuples of) tensors to the CPU; no-op off XLA."""
+    if not IS_XLA or x is None:
+        return x
+    if isinstance(x, (tuple, list)):
+        return type(x)(to_host(t) for t in x)
+    return x.cpu() if torch.is_tensor(x) else x
