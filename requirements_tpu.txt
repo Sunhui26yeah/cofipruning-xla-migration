@@ -1,0 +1,15 @@
+# TPU v5e (PyTorch/XLA) environment. Python 3.10 (torch 2.9 requires >= 3.10).
+# install: pip install -r requirements_tpu.txt --override overrides_tpu.txt  (uv)
+torch==2.9.0
+torch_xla[tpu]==2.9.0
+transformers==4.17.0
+# datasets 1.14.0 fails to import on Python 3.10 (functools.wraps "readonly attribute"); 1.16.1 is the first 1.x with 3.10 support
+datasets==1.16.1
+scipy==1.7.3
+scikit-learn==1.0.2
+numpy==1.21.6
+pyarrow==6.0.1
+setuptools<70
+black
+wandb
+matplotlib

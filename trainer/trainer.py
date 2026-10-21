@@ -29,6 +29,7 @@ from transformers.training_args import TrainingArguments
 from args import AdditionalArguments
 from utils.cofi_utils import *
 from utils.utils import *
+from utils.xla_compat import mark_step, xla_log_fields, dump_xla_metrics
 
 import wandb
 
@@ -96,6 +97,8 @@ class CoFiTrainer(Trainer):
         self.additional_args = additional_args
 
         self.l0_module = l0_module
+        if self.l0_module is not None:
+            self.l0_module = self.l0_module.to(self.args.device)
         self.prepruning_finetune_steps = 100
         self.start_prune = False
 
@@ -157,13 +160,15 @@ class CoFiTrainer(Trainer):
                 lagrangian_params = [{
                     "params": [p for n, p in self.l0_module.named_parameters() if "lambda" in n],
                     "weight_decay": 0.0,
-                    "lr": -self.additional_args.reg_learning_rate
+                    "lr": self.additional_args.reg_learning_rate
                 }]
                 log_params(lagrangian_params, "l0 reg lagrangian params")
+                # gradient ascent on the multipliers: torch>=2 rejects lr<0, maximize=True with lr>0 is the same update
                 self.lagrangian_optimizer = AdamW(lagrangian_params,
                                                     betas=(self.args.adam_beta1,
                                                             self.args.adam_beta2),
-                                                    eps=self.args.adam_epsilon)
+                                                    eps=self.args.adam_epsilon,
+                                                    maximize=True)
 
         if self.lr_scheduler is None:
             if self.additional_args.scheduler_type == "linear":
@@ -267,7 +272,7 @@ class CoFiTrainer(Trainer):
             self.eval_counter.clear()
 
             for step, inputs in enumerate(epoch_iterator):
-                if self.prepruning_finetune_steps > 0 and self.global_step == self.prepruning_finetune_steps: #! before pruning, run 12272 steps
+                if self.prepruning_finetune_steps > 0 and self.global_step == self.prepruning_finetune_steps and self.l0_module is not None: #! before pruning, run 12272 steps
                     self.start_prune = True
 
                     self.optimizer = None
@@ -282,6 +287,11 @@ class CoFiTrainer(Trainer):
                     zs = self.l0_module.forward(training=True) #! get the zs
                     self.fill_inputs_with_zs(zs, inputs) #! use the zs
 
+                if self.global_step == 0 and step == 0:
+                    logger.info(f"Devices: model {next(model.parameters()).device}, "
+                                f"teacher {next(self.teacher_model.parameters()).device if self.teacher_model is not None else None}, "
+                                f"l0 {next(self.l0_module.parameters()).device if self.l0_module is not None else None}, "
+                                f"batch {self._prepare_inputs(dict(inputs))['input_ids'].device}")
                 loss_terms = self.training_step(model, inputs)
                 tr_loss_step = loss_terms["loss"]
                 lag_loss_step = loss_terms["lagrangian_loss"]
@@ -319,6 +329,9 @@ class CoFiTrainer(Trainer):
                     if self.lagrangian_optimizer is not None:
                         self.lagrangian_optimizer.zero_grad()
 
+                    # cut the lazy XLA graph once per optimizer step
+                    mark_step()
+
                     self.global_step += 1
                     self.epoch = epoch + (step + 1) / len(epoch_iterator)
 
@@ -345,6 +358,7 @@ class CoFiTrainer(Trainer):
                             lr = self.args.learning_rate
 
                         logs["learning_rate"] = lr
+                        logs.update(xla_log_fields())
                         logging_loss_scalar = tr_loss_scalar
                         logging_reg_loss_scalar = reg_loss_scalar
                         logging_lag_loss_scalar = lag_loss_scalar
@@ -371,6 +385,7 @@ class CoFiTrainer(Trainer):
                 break
 
         train_pbar.close()
+        dump_xla_metrics(os.path.join(self.args.output_dir, "xla_metrics_report.txt"))
 
         if self.args.past_index and hasattr(self, "_past"):
             # Clean the state at the end of training
@@ -429,6 +444,7 @@ class CoFiTrainer(Trainer):
                 self.fill_inputs_with_zs(zs, inputs) #! use the zs
             loss, logits, labels = self.prediction_step(
                 model, inputs, prediction_loss_only)
+            mark_step()
 
             batch_size = inputs[list(inputs.keys())[0]].shape[0]
 
@@ -541,10 +557,11 @@ class CoFiTrainer(Trainer):
 
     def save_model(self, output_dir: Optional[str] = None):
         output_dir = output_dir if output_dir is not None else self.args.output_dir
-        torch.save(self.l0_module, os.path.join(output_dir, "l0_module.pt"))
+        if self.l0_module is not None:
+            torch.save(self.l0_module, os.path.join(output_dir, "l0_module.pt"))
 
-        zs = self.l0_module.forward(training=False)
-        torch.save(zs, os.path.join(output_dir, "zs.pt"))
+            zs = self.l0_module.forward(training=False)
+            torch.save(zs, os.path.join(output_dir, "zs.pt"))
 
         self.model.save_pretrained(output_dir)
 
@@ -555,9 +572,9 @@ class CoFiTrainer(Trainer):
             head_layer_z = None
             # logger.info(f"zs={zs}")
             if "mlp_z" in zs:
-                mlp_z = zs["mlp_z"].detach().cpu()
+                mlp_z = zs["mlp_z"].detach()
             if "head_layer_z" in zs:
-                head_layer_z = zs["head_layer_z"].detach().cpu()
+                head_layer_z = zs["head_layer_z"].detach()
 
             teacher_layer_output = teacher_outputs[2][1:] #! hidden states, with a length of 12. Every has a shape of [32, 65, 768]
             student_layer_output = student_outputs[2][1:] 
@@ -566,7 +583,7 @@ class CoFiTrainer(Trainer):
             if self.additional_args.layer_distill_version == 2:
                 for layer_num, (t_layer_o, s_layer_o) in enumerate(zip(teacher_layer_output, student_layer_output)):
                     s_layer_o = self.model.layer_transformation(s_layer_o)
-                    l = mse_loss(t_layer_o, s_layer_o)
+                    l = self.masked_mse(t_layer_o, s_layer_o)
                     if mlp_z is None or mlp_z[layer_num] > 0:
                         layer_loss += l
 
@@ -595,7 +612,7 @@ class CoFiTrainer(Trainer):
                 device = transformed_s_layer_o[0].device
                 for t_layer_o in specified_teacher_layer_reps:
                     for i, s_layer_o in enumerate(transformed_s_layer_o): #! student: 12x[32,113,768]
-                        l.append(mse_loss(t_layer_o, s_layer_o))
+                        l.append(self.masked_mse(t_layer_o, s_layer_o))
                 layerwiseloss = torch.stack(l).reshape(
                     len(specified_teacher_layer_reps), len(student_layer_output)) #! [4,12]
 
@@ -610,23 +627,22 @@ class CoFiTrainer(Trainer):
                     alignment = torch.argmin(layerwiseloss, dim=1)
                 #! added the ordering restriction -> to choose the min loss in 4 student layers
                 elif self.additional_args.layer_distill_version in (3, 4, 5, 6):
-                    last_aligned_layer = 12
+                    # same search as the sort/filter loop, on device: walk the student layers in order of increasing
+                    # loss and take the first one passing the filter. As in the original, existing_layers is applied
+                    # by position in the sorted order (indexes[(indexes < last) & existing_layers]).
+                    last_aligned_layer = torch.tensor(12, device=device)
                     alignment = []
                     for search_index in range(len(specified_teacher_layers)-1, -1, -1):
-                        indexes = layerwiseloss[search_index].sort()[1]
+                        indexes = layerwiseloss[search_index].detach().sort()[1]
+                        allowed = indexes < last_aligned_layer
                         if existing_layers is not None:
-                            align = indexes[(
-                                indexes < last_aligned_layer) & existing_layers]
-                        else:
-                            align = indexes[indexes < last_aligned_layer]
-                        if len(align) > 0:
-                            align = align[0]
-                        else:
-                            align = last_aligned_layer
+                            allowed = allowed & existing_layers
+                        first = torch.argmax(allowed.to(torch.int32))
+                        align = torch.where(allowed.any(), indexes[first], last_aligned_layer)
                         alignment.append(align)
                         last_aligned_layer = align
                     alignment.reverse()
-                    alignment = torch.tensor(alignment).to(device)
+                    alignment = torch.stack(alignment)
                 else:
                     logger.info(
                         f"{self.additional_args.layer_distill_version} version is not specified.")
@@ -657,6 +673,19 @@ class CoFiTrainer(Trainer):
 
         return distill_loss, ce_distill_loss, loss
 
+    @staticmethod
+    def batch_position_mask(attention_mask):
+        """[B, L, 1] float mask of the positions shortens_inputs() would keep (< longest sequence in the batch)."""
+        max_length = attention_mask.sum(-1).max()
+        positions = torch.arange(attention_mask.shape[1], device=attention_mask.device)
+        keep = (positions < max_length).to(torch.float32)
+        return keep.view(1, -1, 1).expand(attention_mask.shape[0], -1, 1)
+
+    def masked_mse(self, t, s):
+        """MSELoss(reduction='mean') over the kept positions only."""
+        mask = self._distill_position_mask.to(t.dtype)
+        return (((t - s) ** 2) * mask).sum() / (mask.sum() * t.shape[-1])
+
     def shortens_inputs(self, inputs):
         max_length = inputs["attention_mask"].sum(-1).max().item()
         inputs["input_ids"] = inputs["input_ids"][:, :max_length]
@@ -680,12 +709,14 @@ class CoFiTrainer(Trainer):
                                        "output_attentions", "output_hidden_states", "return_dict"]
                 teacher_inputs = {key: inputs[key]
                                   for key in teacher_inputs_keys if key in inputs}
-                self.shortens_inputs(teacher_inputs)
+                # inputs stay padded to max_seq_length (static shapes for XLA) instead of shortens_inputs();
+                # the layer-distillation MSE is restricted to the first max(len) positions below, which gives
+                # the same loss as the shortened batch (padding keys get zero attention weight)
                 teacher_outputs = self.teacher_model(**teacher_inputs)
-            self.shortens_inputs(inputs)
             student_outputs = model(**inputs) #! get the two outputs
 
             zs = {key: inputs[key] for key in inputs if "_z" in key} #! extract the zs
+            self._distill_position_mask = self.batch_position_mask(inputs["attention_mask"])
             distill_loss, distill_ce_loss, loss = self.calculate_distillation_loss(
                 teacher_outputs, student_outputs, zs)
         else:
