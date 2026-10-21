@@ -157,13 +157,15 @@ class CoFiTrainer(Trainer):
                 lagrangian_params = [{
                     "params": [p for n, p in self.l0_module.named_parameters() if "lambda" in n],
                     "weight_decay": 0.0,
-                    "lr": -self.additional_args.reg_learning_rate
+                    "lr": self.additional_args.reg_learning_rate
                 }]
                 log_params(lagrangian_params, "l0 reg lagrangian params")
+                # gradient ascent on the multipliers: torch>=2 rejects lr<0, maximize=True with lr>0 is the same update
                 self.lagrangian_optimizer = AdamW(lagrangian_params,
                                                     betas=(self.args.adam_beta1,
                                                             self.args.adam_beta2),
-                                                    eps=self.args.adam_epsilon)
+                                                    eps=self.args.adam_epsilon,
+                                                    maximize=True)
 
         if self.lr_scheduler is None:
             if self.additional_args.scheduler_type == "linear":
