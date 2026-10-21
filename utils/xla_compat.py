@@ -21,3 +21,8 @@ if IS_XLA:
 def mark_step():
     if IS_XLA:
         xm.mark_step()
+
+if IS_XLA:
+    # the CUDA reference (torch 1.10) runs float32 matmuls in TF32 by default; XLA's default on TPU is a single
+    # bf16 pass, "high" (bf16_3x) is the closest setting at or above TF32 accuracy
+    torch_xla.backends.set_mat_mul_precision("high")
