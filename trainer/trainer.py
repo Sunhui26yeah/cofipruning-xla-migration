@@ -96,6 +96,8 @@ class CoFiTrainer(Trainer):
         self.additional_args = additional_args
 
         self.l0_module = l0_module
+        if self.l0_module is not None:
+            self.l0_module = self.l0_module.to(self.args.device)
         self.prepruning_finetune_steps = 100
         self.start_prune = False
 
