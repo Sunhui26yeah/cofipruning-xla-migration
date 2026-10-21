@@ -576,7 +576,7 @@ class CoFiTrainer(Trainer):
             if self.additional_args.layer_distill_version == 2:
                 for layer_num, (t_layer_o, s_layer_o) in enumerate(zip(teacher_layer_output, student_layer_output)):
                     s_layer_o = self.model.layer_transformation(s_layer_o)
-                    l = mse_loss(t_layer_o, s_layer_o)
+                    l = self.masked_mse(t_layer_o, s_layer_o)
                     if mlp_z is None or mlp_z[layer_num] > 0:
                         layer_loss += l
 
@@ -605,7 +605,7 @@ class CoFiTrainer(Trainer):
                 device = transformed_s_layer_o[0].device
                 for t_layer_o in specified_teacher_layer_reps:
                     for i, s_layer_o in enumerate(transformed_s_layer_o): #! student: 12x[32,113,768]
-                        l.append(mse_loss(t_layer_o, s_layer_o))
+                        l.append(self.masked_mse(t_layer_o, s_layer_o))
                 layerwiseloss = torch.stack(l).reshape(
                     len(specified_teacher_layer_reps), len(student_layer_output)) #! [4,12]
 
@@ -667,6 +667,19 @@ class CoFiTrainer(Trainer):
 
         return distill_loss, ce_distill_loss, loss
 
+    @staticmethod
+    def batch_position_mask(attention_mask):
+        """[B, L, 1] float mask of the positions shortens_inputs() would keep (< longest sequence in the batch)."""
+        max_length = attention_mask.sum(-1).max()
+        positions = torch.arange(attention_mask.shape[1], device=attention_mask.device)
+        keep = (positions < max_length).to(torch.float32)
+        return keep.view(1, -1, 1).expand(attention_mask.shape[0], -1, 1)
+
+    def masked_mse(self, t, s):
+        """MSELoss(reduction='mean') over the kept positions only."""
+        mask = self._distill_position_mask.to(t.dtype)
+        return (((t - s) ** 2) * mask).sum() / (mask.sum() * t.shape[-1])
+
     def shortens_inputs(self, inputs):
         max_length = inputs["attention_mask"].sum(-1).max().item()
         inputs["input_ids"] = inputs["input_ids"][:, :max_length]
@@ -690,12 +703,14 @@ class CoFiTrainer(Trainer):
                                        "output_attentions", "output_hidden_states", "return_dict"]
                 teacher_inputs = {key: inputs[key]
                                   for key in teacher_inputs_keys if key in inputs}
-                self.shortens_inputs(teacher_inputs)
+                # inputs stay padded to max_seq_length (static shapes for XLA) instead of shortens_inputs();
+                # the layer-distillation MSE is restricted to the first max(len) positions below, which gives
+                # the same loss as the shortened batch (padding keys get zero attention weight)
                 teacher_outputs = self.teacher_model(**teacher_inputs)
-            self.shortens_inputs(inputs)
             student_outputs = model(**inputs) #! get the two outputs
 
             zs = {key: inputs[key] for key in inputs if "_z" in key} #! extract the zs
+            self._distill_position_mask = self.batch_position_mask(inputs["attention_mask"])
             distill_loss, distill_ce_loss, loss = self.calculate_distillation_loss(
                 teacher_outputs, student_outputs, zs)
         else:
