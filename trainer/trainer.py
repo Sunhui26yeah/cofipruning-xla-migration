@@ -29,7 +29,7 @@ from transformers.training_args import TrainingArguments
 from args import AdditionalArguments
 from utils.cofi_utils import *
 from utils.utils import *
-from utils.xla_compat import mark_step
+from utils.xla_compat import mark_step, xla_log_fields, dump_xla_metrics
 
 import wandb
 
@@ -287,6 +287,11 @@ class CoFiTrainer(Trainer):
                     zs = self.l0_module.forward(training=True) #! get the zs
                     self.fill_inputs_with_zs(zs, inputs) #! use the zs
 
+                if self.global_step == 0 and step == 0:
+                    logger.info(f"Devices: model {next(model.parameters()).device}, "
+                                f"teacher {next(self.teacher_model.parameters()).device if self.teacher_model is not None else None}, "
+                                f"l0 {next(self.l0_module.parameters()).device if self.l0_module is not None else None}, "
+                                f"batch {self._prepare_inputs(dict(inputs))['input_ids'].device}")
                 loss_terms = self.training_step(model, inputs)
                 tr_loss_step = loss_terms["loss"]
                 lag_loss_step = loss_terms["lagrangian_loss"]
@@ -353,6 +358,7 @@ class CoFiTrainer(Trainer):
                             lr = self.args.learning_rate
 
                         logs["learning_rate"] = lr
+                        logs.update(xla_log_fields())
                         logging_loss_scalar = tr_loss_scalar
                         logging_reg_loss_scalar = reg_loss_scalar
                         logging_lag_loss_scalar = lag_loss_scalar
@@ -379,6 +385,7 @@ class CoFiTrainer(Trainer):
                 break
 
         train_pbar.close()
+        dump_xla_metrics(os.path.join(self.args.output_dir, "xla_metrics_report.txt"))
 
         if self.args.past_index and hasattr(self, "_past"):
             # Clean the state at the end of training
