@@ -640,7 +640,7 @@ class CoFiTrainer(Trainer):
                         if existing_layers is not None:
                             allowed = allowed & existing_layers
                         first = torch.argmax(allowed.to(torch.int32))
-                        align = torch.where(allowed.any(), indexes[first], last_aligned_layer)
+                        align = torch.where(allowed.any(), indexes.gather(0, first.view(1)).squeeze(0), last_aligned_layer)  # gather: a 0-dim index would call .item()
                         alignment.append(align)
                         last_aligned_layer = align
                     alignment.reverse()
