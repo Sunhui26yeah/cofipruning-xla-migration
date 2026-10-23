@@ -1,3 +1,21 @@
+## TPU migration: result curves
+
+This repository records an agent-driven migration of the original code from NVIDIA GPUs to Google Cloud TPUs, part of the study *Can Coding Agents Migrate Machine Learning Projects Across Hardware Accelerators?* (ICSE 2027 SEIP). The original project's README follows below the figures.
+
+**Full runs: the original code on an NVIDIA L4 GPU and the migrated code on a TPU v5e-1, with the paper's values as references.** ([PDF](migration_figures/curves.pdf))
+
+![curves](migration_figures/curves.png)
+
+**Smoke test before the full run: the original code on the GPU against the migrated code on the TPU.** ([PDF](migration_figures/smoke_compare.pdf))
+
+![smoke_compare](migration_figures/smoke_compare.png)
+
+**Smoke test of attempt 4, whose gap exposed stale parameter copies after the device move.** ([PDF](migration_figures/smoke_compare_a4.pdf))
+
+![smoke_compare_a4](migration_figures/smoke_compare_a4.png)
+
+---
+
 ## ☕ CoFiPruning: Structured Pruning Learns Compact and Accurate Models
 
 This repository contains the code and pruned models for our ACL'22 paper [Structured Pruning Learns Compact and Accurate Models](https://arxiv.org/pdf/2204.00408.pdf). Our talk slides can be found [here](https://github.com/princeton-nlp/CoFiPruning/blob/main/ACL2022_talk.pdf). Numerical results in the paper can be found [here](https://docs.google.com/spreadsheets/d/1IF6ReWkSDKnZomvQT9GBlEhfN48NoDyr-XHOvD2vjvs/edit#gid=0). 
